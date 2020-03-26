@@ -1,0 +1,13 @@
+[package]
+name = "buddy-allocator"
+version = "0.1.0"
+authors = ["Tom Dohrmann <erbse.13@gmx.de>"]
+edition = "2018"
+license = "WTFPL"
+keywords = ["buddy", "alloc-wg", "no_std"]
+categories = ["no-std", "memory-management"]
+description = "A buddy allocator implementation supporting alloc-wg"
+repository = "https://github.com/Freax13/buddy-allocator"
+
+[dependencies]
+alloc-wg = "0.8"
