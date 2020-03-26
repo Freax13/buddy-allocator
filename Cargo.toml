@@ -10,4 +10,8 @@ description = "A buddy allocator implementation supporting alloc-wg"
 repository = "https://github.com/Freax13/buddy-allocator"
 
 [dependencies]
-alloc-wg = "0.8"
+alloc-wg = { version = "0.8", default-features = false }
+
+[features]
+default = ["std"]
+std = ["alloc-wg/std"]
