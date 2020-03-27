@@ -29,7 +29,11 @@ impl Actions {
                         return Err(());
                     }
                 }
-                _ => {}
+                Action::Grow { index, .. } | Action::Shrink { index, .. } => {
+                    if !ids.contains(&index) {
+                        return Err(());
+                    }
+                }
             }
         }
 
@@ -53,7 +57,8 @@ fuzz_target!(|actions: Actions| {
 
         let mut allocated = 0;
         let mut references = HashMap::new();
-        let allocator: BuddyAllocator<System, 16usize, 6usize> = BuddyAllocator::try_new(System).unwrap();
+        let allocator: BuddyAllocator<System, 16usize, 6usize> =
+            BuddyAllocator::try_new(System).unwrap();
 
         for action in actions.actions {
             trace!("{:?} => {}", action, allocated);
@@ -99,6 +104,18 @@ fuzz_target!(|actions: Actions| {
                         }
                     }
                 }
+            }
+
+            for memory in references.values_mut() {
+                unsafe {
+                    allocator.grow(
+                        memory,
+                        memory.size(),
+                        ReallocPlacement::InPlace,
+                        AllocInit::Uninitialized,
+                    )
+                }
+                .expect("grow check failed");
             }
         }
 

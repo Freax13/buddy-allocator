@@ -4,23 +4,26 @@
 
 use core::mem::MaybeUninit;
 
+#[cfg(feature = "alloc")]
 use alloc_wg::alloc::{AllocErr, AllocInit, AllocRef, Layout, MemoryBlock, ReallocPlacement};
+#[cfg(feature = "alloc")]
+use core::ptr::NonNull;
 use core::{
     ops::Index,
-    ptr::NonNull,
     sync::atomic::{AtomicBool, Ordering},
 };
 
+#[cfg(feature = "alloc")]
 pub struct BuddyAllocator<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize> {
     allocator: AR,
     memory: Option<MemoryBlock>,
-    buddys: Buddys<{ Self::USED_SIZE }>,
+    buddys: Buddys<ORDER>,
 }
 
+#[cfg(feature = "alloc")]
 impl<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize>
     BuddyAllocator<AR, BLOCK_SIZE, ORDER>
 {
-    const USED_SIZE: usize = (1 << (ORDER + 1)) - 1;
     const ENTIRE_SIZE: usize = (1 << ORDER) * BLOCK_SIZE;
 
     /// try to create a new buddy allocator
@@ -89,7 +92,7 @@ impl<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize>
         // convert the size to size in blocks
         let (level, block_size) = self.level_and_size(size);
         let inner_addr = addr & (Self::ENTIRE_SIZE - 1);
-        let idx = inner_addr / block_size;
+        let idx = inner_addr / BLOCK_SIZE;
 
         // assert that the block is placed correctly
         let block_mask = block_size - 1;
@@ -98,15 +101,15 @@ impl<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize>
         (level, idx)
     }
 
-    fn calc_address(&self, idx: usize, level: usize) -> NonNull<u8> {
+    fn calc_address(&self, idx: usize) -> NonNull<u8> {
         let memory = self.memory.as_ref().unwrap();
         let ptr = memory.ptr().as_ptr() as usize;
-        let block_size = BLOCK_SIZE * (1 << (ORDER - level - 1));
-        let offset = block_size * idx;
+        let offset = BLOCK_SIZE * idx;
         NonNull::new((ptr + offset) as *const u8 as *mut _).unwrap()
     }
 }
 
+#[cfg(feature = "alloc")]
 unsafe impl<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize> AllocRef
     for &BuddyAllocator<AR, BLOCK_SIZE, ORDER>
 {
@@ -119,7 +122,7 @@ unsafe impl<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize> AllocRef
         let idx = self.buddys.allocate(level).ok_or(AllocErr)?;
 
         // constructing memory
-        let ptr = self.calc_address(idx, level);
+        let ptr = self.calc_address(idx);
         let new_layout = Layout::from_size_align(block_size, old_align).unwrap();
         let mut memory = unsafe { MemoryBlock::new(ptr, new_layout) };
 
@@ -145,6 +148,7 @@ unsafe impl<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize> AllocRef
         let old_size = memory.size();
         let old_ptr = memory.ptr();
         let size = old_align.max(old_size);
+        let new_size = old_align.max(new_size);
 
         // calculate idx & level
         let (old_level, old_idx) = self.location(old_ptr, size);
@@ -158,11 +162,11 @@ unsafe impl<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize> AllocRef
         // try growing the memory
         let idx = self
             .buddys
-            .grow(old_idx, old_level, new_level, placement)
+            .grow(old_idx, old_level, new_level, placement.into())
             .ok_or(AllocErr)?;
 
         // re-initialize the memory
-        let new_ptr = self.calc_address(idx, new_level);
+        let new_ptr = self.calc_address(idx);
         if let AllocInit::Zeroed = init {
             let old_start = old_ptr.as_ptr() as usize;
             let old_end = old_start + old_size;
@@ -195,8 +199,13 @@ unsafe impl<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize> AllocRef
         new_size: usize,
         _placement: ReallocPlacement,
     ) -> Result<(), AllocErr> {
+        let old_align = memory.align();
+        let old_size = memory.size();
+        let size = old_align.max(old_size);
+        let new_size = old_align.max(new_size);
+
         // calculate idx & level
-        let (old_level, old_idx) = self.location(memory.ptr(), memory.layout().size());
+        let (old_level, old_idx) = self.location(memory.ptr(), size);
         let (new_level, block_size) = self.level_and_size(new_size);
 
         // make sure it's actually shrinking
@@ -215,6 +224,7 @@ unsafe impl<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize> AllocRef
     }
 }
 
+#[cfg(feature = "alloc")]
 impl<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize> Drop
     for BuddyAllocator<AR, BLOCK_SIZE, ORDER>
 {
@@ -226,68 +236,112 @@ impl<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize> Drop
     }
 }
 
-struct Buddys<const BLOCKS: usize>([AtomicBool; BLOCKS]);
+const fn blocks(order: usize) -> usize {
+    (1 << (order + 1)) - 1
+}
 
-impl<const BLOCKS: usize> Buddys<BLOCKS> {
-    fn new() -> Self {
-        let blocks: Self = unsafe { MaybeUninit::zeroed().assume_init() };
-        for i in 0..BLOCKS {
-            blocks.0[i].store(i == 0, Ordering::Relaxed);
+pub struct Buddys<const ORDER: usize> {
+    blocks: Blocks<{ blocks(ORDER) }>,
+}
+
+struct Blocks<const BLOCKS: usize>([AtomicBool; BLOCKS]);
+
+pub enum GrowPlacement {
+    MayMove,
+    InPlace,
+}
+
+#[cfg(feature = "alloc")]
+impl From<ReallocPlacement> for GrowPlacement {
+    fn from(placement: ReallocPlacement) -> GrowPlacement {
+        match placement {
+            ReallocPlacement::MayMove => GrowPlacement::MayMove,
+            ReallocPlacement::InPlace => GrowPlacement::InPlace,
         }
+    }
+}
+
+impl<const ORDER: usize> Buddys<ORDER> {
+    pub fn new() -> Self {
+        let blocks: Self = unsafe { MaybeUninit::zeroed().assume_init() };
+        (blocks.blocks).0[0].store(true, Ordering::Relaxed);
         blocks
     }
 
-    fn allocate(&self, level: usize) -> Option<usize> {
+    pub fn allocate(&self, level: usize) -> Option<usize> {
+        let shift = ORDER - level - 1;
+
         for idx in 0..1 << level {
-            let was_available = self[(level, idx)].compare_and_swap(true, false, Ordering::Relaxed);
+            let was_available =
+                self.blocks[(level, idx)].compare_and_swap(true, false, Ordering::Relaxed);
             if was_available {
-                return Some(idx);
+                return Some(idx << shift);
             }
         }
 
         if level != 0 {
             if let Some(idx) = self.allocate(level - 1) {
-                let idx = idx << 1;
-                self[(level, idx ^ 1)].store(true, Ordering::Relaxed);
-                return Some(idx);
+                let idx = idx >> shift;
+                self.blocks[(level, idx ^ 1)].store(true, Ordering::Relaxed);
+                return Some(idx << shift);
             }
         }
 
         None
     }
 
-    fn deallocate(&self, idx: usize, level: usize) {
+    pub fn deallocate(&self, idx: usize, level: usize) {
+        let shift = ORDER - level - 1;
+        let idx = idx >> shift;
+
+        assert!(!self.blocks[(level, idx)].load(Ordering::Relaxed));
+
         if level != 0 {
             // try to join with the buddy
             let was_available =
-                self[(level, idx ^ 1)].compare_and_swap(true, false, Ordering::Relaxed);
+                self.blocks[(level, idx ^ 1)].compare_and_swap(true, false, Ordering::Relaxed);
             if was_available {
-                self.deallocate(idx >> 1, level - 1);
+                self.deallocate(idx << shift, level - 1);
                 return;
             }
         }
 
         // mark as available
-        self[(level, idx)].store(true, Ordering::Relaxed);
+        self.blocks[(level, idx)].store(true, Ordering::Relaxed);
     }
 
-    fn shrink(&self, idx: usize, old_level: usize, new_level: usize) {
+    pub fn shrink(&self, idx: usize, old_level: usize, new_level: usize) {
+        let shift = ORDER - old_level - 1;
+        let idx = idx >> shift;
+
+        assert!(!self.blocks[(old_level, idx)].load(Ordering::Relaxed));
+
         let level_diff = new_level - old_level;
-        for i in 0..level_diff {
-            self[(old_level + i, (idx << i) ^ 1)].store(true, Ordering::Relaxed);
+        for i in 1..=level_diff {
+            self.blocks[(old_level + i, (idx << i) ^ 1)].store(true, Ordering::Relaxed);
         }
     }
 
-    fn grow(
+    pub fn grow(
         &self,
         idx: usize,
         old_level: usize,
         new_level: usize,
-        placement: ReallocPlacement,
+        placement: GrowPlacement,
     ) -> Option<usize> {
+        let old_shift = ORDER - old_level - 1;
+        let new_shift = ORDER - new_level - 1;
+        let idx = idx >> old_shift;
+
+        assert!(!self.blocks[(old_level, idx)].load(Ordering::Relaxed));
+
         let level_diff = old_level - new_level;
 
-        if let ReallocPlacement::InPlace = placement {
+        if level_diff == 0 {
+            return Some(idx << old_shift);
+        }
+
+        if let GrowPlacement::InPlace = placement {
             // check if block is already perfectly aligned
             if idx & ((2 << level_diff) - 1) != 0 {
                 return None;
@@ -296,7 +350,7 @@ impl<const BLOCKS: usize> Buddys<BLOCKS> {
 
         for i in 0..level_diff {
             // try to join with the buddy
-            let was_available = self[(old_level - i, (idx >> i) ^ 1)].compare_and_swap(
+            let was_available = self.blocks[(old_level - i, (idx >> i) ^ 1)].compare_and_swap(
                 true,
                 false,
                 Ordering::Relaxed,
@@ -305,17 +359,23 @@ impl<const BLOCKS: usize> Buddys<BLOCKS> {
             if !was_available {
                 // revert all changes
                 for i in 0..i {
-                    self[(old_level - i, (idx >> i) ^ 1)].store(true, Ordering::Relaxed);
+                    self.blocks[(old_level - i, (idx >> i) ^ 1)].store(true, Ordering::Relaxed);
                 }
                 return None;
             }
         }
 
-        Some(idx >> level_diff)
+        Some((idx >> level_diff) << new_shift)
     }
 }
 
-impl<const BLOCKS: usize> Index<(usize, usize)> for Buddys<BLOCKS> {
+impl<const ORDER: usize> Default for Buddys<ORDER> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const ORDER: usize> Index<(usize, usize)> for Blocks<ORDER> {
     type Output = AtomicBool;
 
     fn index(&self, (level, idx): (usize, usize)) -> &AtomicBool {
@@ -326,10 +386,10 @@ impl<const BLOCKS: usize> Index<(usize, usize)> for Buddys<BLOCKS> {
             level
         );
         debug_assert!(
-            BLOCKS >= 1 << level,
-            "level {} is too big for {} blocks",
+            ORDER >= level,
+            "level {} is too big for order {}",
             level,
-            BLOCKS
+            ORDER
         );
 
         let base = (1 << level) - 1;
