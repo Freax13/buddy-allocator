@@ -1,79 +1,103 @@
-use crate::{AddressSpace, AddressSpaceAllocator};
+use crate::Buddies;
 use alloc_wg::alloc::{AllocErr, AllocInit, AllocRef, Layout, MemoryBlock, ReallocPlacement};
 use core::ptr::NonNull;
 
-pub struct BuddyAllocator<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize> {
+pub struct BuddyAllocator<AR: AllocRef> {
     allocator: AR,
     memory: Option<MemoryBlock>,
-    address_space_allocator: AddressSpaceAllocator<BLOCK_SIZE, ORDER>,
+    buddies: Buddies<AR>,
 }
 
-impl<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize>
-    BuddyAllocator<AR, BLOCK_SIZE, ORDER>
-{
-    const ENTIRE_SIZE: usize = (1 << ORDER) * BLOCK_SIZE;
-
+impl<AR: AllocRef> BuddyAllocator<AR> {
     /// try to create a new buddy allocator
+    ///
+    /// see [Buddies::new]
     /// ```
-    /// use alloc_wg::alloc::System;
+    /// use alloc_wg::alloc::Global;
+    /// use alloc_wg::boxed::Box;
     /// use buddy_allocator::BuddyAllocator;
-    /// let allocator: BuddyAllocator<_, 16usize, 5usize> = BuddyAllocator::try_new(System).unwrap();
+    ///
+    /// let allocator = BuddyAllocator::try_new(5, 16, None, Global).unwrap();
+    /// let boxed = Box::new_in(123, &allocator);
     /// ```
-    pub fn try_new(allocator: AR) -> Result<Self, AllocErr> {
-        assert!(
-            BLOCK_SIZE.is_power_of_two(),
-            "BLOCK_SIZE must be a power of two"
-        );
-        assert!(ORDER != 0, "ORDER must not be zero");
+    pub fn try_new(
+        max_order: usize,
+        multiplier: usize,
+        max_idx: Option<usize>,
+        allocator: AR,
+    ) -> Result<Self, AllocErr> {
+        let buddies = Buddies::new_in(max_order, multiplier, max_idx, allocator);
+        let layout = Layout::from_size_align(buddies.capacity(), buddies.capacity())
+            .map_err(|_| AllocErr)?;
 
-        let layout =
-            Layout::from_size_align(Self::ENTIRE_SIZE, Self::ENTIRE_SIZE).map_err(|_| AllocErr)?;
         let memory = allocator.alloc(layout, AllocInit::Uninitialized)?;
-        let ptr = memory.ptr();
         Ok(BuddyAllocator {
             allocator,
             memory: Some(memory),
-            address_space_allocator: AddressSpaceAllocator::new(ptr),
+            buddies,
         })
     }
 
-    /// check if the allocator is unused
-    /// # Safety
-    /// calling this method is equivalent to trying to allocate the entire memory inside thus rendering the allocator useless after it returned true
-    pub fn is_unused(&self) -> bool {
-        self.address_space_allocator.is_unused()
+    /// get the base ptr
+    /// ```
+    /// use alloc_wg::alloc::Global;
+    /// use buddy_allocator::BuddyAllocator;
+    ///
+    /// let allocator = BuddyAllocator::try_new(5, 16, None, Global).unwrap();
+    /// allocator.base_ptr();
+    /// ```
+    pub fn base_ptr(&self) -> NonNull<u8> {
+        self.memory.as_ref().unwrap().ptr()
     }
 
-    /// get the base address
-    pub fn base_address(&self) -> NonNull<u8> {
-        self.address_space_allocator.base_address()
+    fn offset(&self, other: NonNull<u8>) -> usize {
+        let address = other.as_ptr() as usize;
+        let base_address = self.base_ptr().as_ptr() as usize;
+        address - base_address
+    }
+
+    fn ptr(&self, offset: usize) -> NonNull<u8> {
+        let address = self.base_ptr().as_ptr() as usize + offset;
+        let ptr = address as *const u8 as *mut u8;
+        NonNull::new(ptr).unwrap()
     }
 
     /// get the capacitiy
+    /// ```
+    /// use alloc_wg::alloc::Global;
+    /// use buddy_allocator::BuddyAllocator;
+    ///
+    /// let allocator = BuddyAllocator::try_new(5, 16, None, Global).unwrap();
+    /// assert_eq!(allocator.capacitiy(), 256);
+    /// ```
     pub fn capacitiy(&self) -> usize {
-        self.address_space_allocator.capacitiy()
+        self.buddies.capacity()
     }
 }
 
-unsafe impl<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize> AllocRef
-    for &BuddyAllocator<AR, BLOCK_SIZE, ORDER>
-{
+unsafe impl<AR: AllocRef> AllocRef for &BuddyAllocator<AR> {
     fn alloc(self, layout: Layout, init: AllocInit) -> Result<MemoryBlock, AllocErr> {
         // try to allocate address space
-        let address_space = self.address_space_allocator.alloc(layout)?;
+        let offset = self
+            .buddies
+            .allocate(layout.size(), layout.align())
+            .ok_or(AllocErr)?;
 
         // construct memory
-        let mut memory = unsafe { MemoryBlock::new(address_space.ptr(), address_space.layout()) };
+        let layout =
+            Layout::from_size_align(layout.size().next_power_of_two(), layout.align()).unwrap();
+        let ptr = self.ptr(offset);
+        let mut memory = unsafe { MemoryBlock::new(ptr, layout) };
 
-        // initializing memory
+        // initialize memory
         memory.init(init);
 
         Ok(memory)
     }
 
     unsafe fn dealloc(self, memory: MemoryBlock) {
-        let address_space = AddressSpace::new(memory.ptr(), memory.layout());
-        self.address_space_allocator.dealloc(address_space);
+        let offset = self.offset(memory.ptr());
+        self.buddies.deallocate(offset, memory.size());
     }
 
     unsafe fn grow(
@@ -84,12 +108,15 @@ unsafe impl<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize> AllocRef
         init: AllocInit,
     ) -> Result<(), AllocErr> {
         // try growing the memory
-        let mut address_space = AddressSpace::new(memory.ptr(), memory.layout());
-        self.address_space_allocator
-            .grow(&mut address_space, new_size, placement)?;
+        let offset = self.offset(memory.ptr());
+        let new_offset = self
+            .buddies
+            .grow(offset, memory.size(), new_size, placement)
+            .ok_or(AllocErr)?;
+        let new_size = self.buddies.real_size_for_allocation(new_size);
 
         // re-initialize the memory
-        let new_ptr = address_space.ptr();
+        let new_ptr = self.ptr(new_offset);
         if let AllocInit::Zeroed = init {
             let old_size = memory.size();
             let old_ptr = memory.ptr();
@@ -97,7 +124,7 @@ unsafe impl<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize> AllocRef
             let old_start = old_ptr.as_ptr() as usize;
             let old_end = old_start + old_size;
             let new_start = new_ptr.as_ptr() as usize;
-            let new_end = new_start + address_space.size();
+            let new_end = new_start + new_size;
 
             // initialize memory in front of the old memory
             if new_start < old_start {
@@ -113,7 +140,8 @@ unsafe impl<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize> AllocRef
         }
 
         // update memory
-        *memory = MemoryBlock::new(address_space.ptr(), address_space.layout());
+        let layout = Layout::from_size_align(new_size, memory.align()).unwrap();
+        *memory = MemoryBlock::new(new_ptr, layout);
 
         Ok(())
     }
@@ -122,23 +150,22 @@ unsafe impl<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize> AllocRef
         self,
         memory: &mut MemoryBlock,
         new_size: usize,
-        placement: ReallocPlacement,
+        _placement: ReallocPlacement,
     ) -> Result<(), AllocErr> {
         // shrink in place
-        let mut address_space = AddressSpace::new(memory.ptr(), memory.layout());
-        self.address_space_allocator
-            .shrink(&mut address_space, new_size, placement)?;
+        let offset = self.offset(memory.ptr());
+        self.buddies.shrink(offset, memory.size(), new_size);
+        let new_size = self.buddies.real_size_for_allocation(new_size);
 
         // update memory
-        *memory = MemoryBlock::new(address_space.ptr(), address_space.layout());
+        let layout = Layout::from_size_align(new_size, memory.align()).unwrap();
+        *memory = MemoryBlock::new(memory.ptr(), layout);
 
         Ok(())
     }
 }
 
-impl<AR: AllocRef, const BLOCK_SIZE: usize, const ORDER: usize> Drop
-    for BuddyAllocator<AR, BLOCK_SIZE, ORDER>
-{
+impl<AR: AllocRef> Drop for BuddyAllocator<AR> {
     fn drop(&mut self) {
         let memory = self.memory.take().unwrap();
         unsafe {
