@@ -38,6 +38,35 @@ impl<AR: AllocRef> BuddyAllocator<AR> {
         })
     }
 
+    /// try to create a new buddy allocator
+    ///
+    /// see [Buddies::with_capacity]
+    /// ```
+    /// use alloc_wg::alloc::Global;
+    /// use alloc_wg::boxed::Box;
+    /// use buddy_allocator::BuddyAllocator;
+    ///
+    /// let allocator = BuddyAllocator::try_with_capacity(320, 16, Global).unwrap();
+    /// let boxed = Box::new_in(16, &allocator);
+    /// ```
+    pub fn try_with_capacity(
+        capacity: usize,
+        multiplier: usize,
+        allocator: AR,
+    ) -> Result<Self, AllocErr> {
+        let buddies = Buddies::with_capacity_in(capacity, multiplier, allocator);
+        let layout =
+            Layout::from_size_align(buddies.capacity(), buddies.capacity().next_power_of_two())
+                .map_err(|_| AllocErr)?;
+
+        let memory = allocator.alloc(layout, AllocInit::Uninitialized)?;
+        Ok(BuddyAllocator {
+            allocator,
+            memory: Some(memory),
+            buddies,
+        })
+    }
+
     /// get the base ptr
     /// ```
     /// use alloc_wg::alloc::Global;
