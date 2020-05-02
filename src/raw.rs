@@ -189,6 +189,31 @@ impl<A: AllocRef> RawBuddies<A> {
         None
     }
 
+    pub fn allocate_at_with_size(&self, size: usize, idx: usize) -> bool {
+        assert!(size <= self.max_idx, "size is too big");
+
+        let order = self.calculate_order_for_size(size);
+        self.allocate_at(order, idx)
+    }
+
+    pub fn allocate_at(&self, order: usize, idx: usize) -> bool {
+        let was_available =
+            self[(order, idx >> self.base_shift)].compare_and_swap(true, false, Ordering::Relaxed);
+        if was_available {
+            return true;
+        }
+
+        if order != 0 {
+            let block_size = self.calculate_block_size(order) << self.base_shift;
+            if self.allocate_at(order - 1, idx & !block_size) {
+                self[(order, (idx ^ block_size) >> self.base_shift)].store(true, Ordering::Relaxed);
+                return true;
+            }
+        }
+
+        false
+    }
+
     pub fn deallocate_with_size(&self, idx: usize, size: usize) {
         self.allocations.fetch_sub(1, Ordering::Relaxed);
         let order = self.calculate_order_for_size(size);
@@ -196,7 +221,11 @@ impl<A: AllocRef> RawBuddies<A> {
     }
 
     fn deallocate(&self, orig_idx: usize, order: usize) {
-        assert_eq!(orig_idx & ((1 << self.base_shift) - 1), 0);
+        assert_eq!(
+            orig_idx & ((1 << self.base_shift) - 1),
+            0,
+            "alignment is off"
+        );
 
         let idx = orig_idx >> self.base_shift;
         let block_size = self.calculate_block_size(order);
@@ -229,7 +258,11 @@ impl<A: AllocRef> RawBuddies<A> {
     }
 
     fn shrink(&self, orig_idx: usize, old_order: usize, new_order: usize) {
-        assert_eq!(orig_idx & ((1 << self.base_shift) - 1), 0);
+        assert_eq!(
+            orig_idx & ((1 << self.base_shift) - 1),
+            0,
+            "alignment is off"
+        );
         let idx = orig_idx >> self.base_shift;
         let mut block_size = self.calculate_block_size(old_order);
 
@@ -266,7 +299,11 @@ impl<A: AllocRef> RawBuddies<A> {
         new_order: usize,
         placement: ReallocPlacement,
     ) -> Option<usize> {
-        assert_eq!(orig_idx & ((1 << self.base_shift) - 1), 0);
+        assert_eq!(
+            orig_idx & ((1 << self.base_shift) - 1),
+            0,
+            "alignment is off"
+        );
         let idx = orig_idx >> self.base_shift;
         let mut block_size = self.calculate_block_size(old_order);
         let new_block_size = self.calculate_block_size(new_order);

@@ -121,6 +121,27 @@ impl<A: AllocRef> Buddies<A> {
         self.raw.real_size_for_allocation(size)
     }
 
+    /// try to allocate a buddy with a given size at a given index
+    /// # Panics
+    /// panics if:
+    /// - `idx + size` is too big
+    /// - `idx` is not properly aligned
+    /// ```
+    /// use buddy_allocator::Buddies;
+    ///
+    /// let buddies = Buddies::new(5, 1, None);
+    /// assert_eq!(buddies.allocate_at(1, 0), true);
+    /// assert_eq!(buddies.allocate_at(2, 2), true);
+    /// assert_eq!(buddies.allocate_at(1, 3), false);
+    /// assert_eq!(buddies.allocate_at(2, 4), true);
+    /// assert_eq!(buddies.allocate_at(2, 4), false);
+    /// assert_eq!(buddies.allocate_at(1, 5), false);
+    /// assert_eq!(buddies.allocate_at(2, 8), true);
+    /// ```
+    pub fn allocate_at(&self, size: usize, idx: usize) -> bool {
+        self.raw.allocate_at_with_size(size, idx)
+    }
+
     /// allocate a buddy with a given size
     /// # Panics
     /// panics if:

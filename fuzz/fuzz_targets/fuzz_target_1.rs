@@ -70,6 +70,15 @@ impl Actions {
                     ids.insert(allocated, *size);
                     allocated += 1;
                 }
+                Action::AllocateAt { size, idx } => {
+                    *size %= max_size;
+                    *idx %= max_size - *size;
+                    *idx >>= base_shift;
+                    *idx <<= base_shift;
+                    *idx &= !(size.next_power_of_two()-1);
+                    ids.insert(allocated, *size);
+                    allocated += 1;
+                }
                 Action::Deallocate { index } => {
                     if allocated == 0 {
                         return Err(());
@@ -113,6 +122,7 @@ impl Actions {
 #[derive(Debug, Clone, Arbitrary)]
 enum Action {
     Allocate { size: usize, align: usize },
+    AllocateAt {size: usize, idx: usize},
     Deallocate { index: usize },
     Grow { index: usize, size: usize },
     Shrink { index: usize, size: usize },
@@ -161,6 +171,23 @@ fuzz_target!(|actions: Actions| {
                     }
 
                     references.insert(id, (idx, size));
+                }
+                Action::AllocateAt {size, idx} => {
+                    trace!("Allocating at {} with size {}",idx, size);
+                    if buddies.allocate_at(size, idx) {
+                        trace!("Allocated at {} with size {}", idx, size);
+                        let id = allocated;
+                        allocated += 1;
+
+                        for i in idx..idx + size {
+                            assert!(!fake_memory[i]);
+                            fake_memory[i] = true;
+                        }
+                        references.insert(id, (idx, size));
+                    } else {
+                        trace!("Failed allocation");
+                        return Err(())
+                    }
                 }
                 Action::Deallocate { index } => {
                     let (idx, size) = references.remove(&index).unwrap();

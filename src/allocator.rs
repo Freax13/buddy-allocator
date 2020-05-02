@@ -102,6 +102,19 @@ impl<AR: AllocRef> BuddyAllocator<AR> {
     pub fn capacitiy(&self) -> usize {
         self.buddies.capacity()
     }
+
+    /// try to allocate the memory at the given ptr
+    pub fn allocate_at(&self, ptr: NonNull<u8>, layout: Layout, init: AllocInit) -> Result<MemoryBlock, AllocErr> {
+        let offset = self.offset(ptr);
+        assert_eq!(offset & !(layout.align()-1), 0, "alignment is off");
+        if self.buddies.allocate_at(layout.size(), offset) {
+            let mut memory = unsafe {MemoryBlock::new(ptr, layout)};
+            memory.init(init);
+            Ok(memory)
+        } else {
+            Err(AllocErr)
+        }
+    }
 }
 
 unsafe impl<AR: AllocRef> AllocRef for &BuddyAllocator<AR> {

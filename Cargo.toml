@@ -15,3 +15,6 @@ alloc-wg = { version = "0.8", default-features = false }
 [features]
 default = ["std"]
 std = ["alloc-wg/std"]
+
+[patch.crates-io]
+alloc-wg = { git = "https://github.com/Freax13/alloc-wg", branch = "fix-nightly" }

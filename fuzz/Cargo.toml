@@ -26,3 +26,6 @@ members = ["."]
 [[bin]]
 name = "fuzz_target_1"
 path = "fuzz_targets/fuzz_target_1.rs"
+
+[patch.crates-io]
+alloc-wg = { git = "https://github.com/Freax13/alloc-wg", branch = "fix-nightly" }
