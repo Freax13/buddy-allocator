@@ -10,11 +10,8 @@ description = "A buddy allocator implementation supporting alloc-wg"
 repository = "https://github.com/Freax13/buddy-allocator"
 
 [dependencies]
-alloc-wg = { version = "0.8", default-features = false }
+alloc-wg = { version = "0.9", default-features = false }
 
 [features]
 default = ["std"]
 std = ["alloc-wg/std"]
-
-[patch.crates-io]
-alloc-wg = { git = "https://github.com/Freax13/alloc-wg", branch = "fix-nightly" }

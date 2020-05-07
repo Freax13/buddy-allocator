@@ -1,4 +1,6 @@
 #![no_std]
+#![feature(allocator_api)]
+#![feature(ptr_offset_from)]
 
 mod allocator;
 mod raw;
@@ -206,6 +208,7 @@ impl<A: AllocRef> Buddies<A> {
     /// - `new_size` is smaller that `old_size`
     /// - `new_size` is too big
     /// ```
+    /// #![feature(allocator_api)]
     /// use alloc_wg::alloc::ReallocPlacement;
     /// use buddy_allocator::Buddies;
     ///
