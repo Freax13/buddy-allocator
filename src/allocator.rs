@@ -12,6 +12,9 @@ pub struct BuddyAllocator<AR: AllocRef> {
     buddies: Buddies<AR>,
 }
 
+unsafe impl<AR: AllocRef + Send> Send for BuddyAllocator<AR> {}
+unsafe impl<AR: AllocRef + Sync> Sync for BuddyAllocator<AR> {}
+
 impl<AR: AllocRef + Copy> BuddyAllocator<AR> {
     /// try to create a new buddy allocator
     ///
@@ -208,7 +211,7 @@ unsafe impl<AR: AllocRef + Copy> AllocRef for &BuddyAllocator<AR> {
 
             // initialize memory behind the old memory
             if new_end > old_end {
-                let offset =  old_end.offset_from(new_end).try_into().unwrap();
+                let offset = old_end.offset_from(new_end).try_into().unwrap();
                 old_end.write_bytes(0, offset);
             }
         }
